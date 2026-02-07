@@ -154,6 +154,9 @@ const errors = {
   unprocessable: (message = "Unprocessable entity", errors = null) =>
     new ApiError(422, message, errors),
 
+  tooManyRequests: (message = "Too many requests, please try again later") =>
+    new ApiError(429, message),
+
   internal: (message = "Internal server error") => new ApiError(500, message),
 
   notImplemented: (message = "Not implemented") => new ApiError(501, message),

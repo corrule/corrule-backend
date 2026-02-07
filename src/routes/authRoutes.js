@@ -76,9 +76,10 @@ router.post(
   "/verify-2fa",
   [
     body("userId").notEmpty().withMessage("User ID is required"),
-    body("token")
+    body("code")
       .isLength({ min: 6, max: 6 })
-      .withMessage("Invalid 2FA token format"),
+      .withMessage("Invalid 2FA code format"),
+    body("type").optional().isIn(["email", "totp"]).withMessage("Invalid 2FA type"),
   ],
   validate,
   authController.verify2FA,

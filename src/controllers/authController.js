@@ -85,6 +85,10 @@ exports.register = asyncHandler(async (req, res) => {
 
 // Login user
 exports.login = asyncHandler(async (req, res, next) => {
+  const {
+    generateAndStoreCode,
+  } = require("../services/twoFactorService");
+  const { send2FAEmail } = require("../utils/email");
   const passport = require("passport");
 
   passport.authenticate(
@@ -100,13 +104,38 @@ exports.login = asyncHandler(async (req, res, next) => {
           throw errors.unauthorized(info?.message || "Authentication failed");
         }
 
-        // Check if 2FA is required
-        if (user.requires2FA) {
+        // Check if email-based 2FA is enabled
+        if (user.twoFactorEmail && user.twoFactorEmail.enabled) {
+          // Generate and store verification code
+          const code = generateAndStoreCode(user);
+          await user.save();
+
+          // Send code to user's email
+          try {
+            await send2FAEmail(user.email, code);
+          } catch (emailError) {
+            console.error("Failed to send 2FA code:", emailError);
+            throw errors.internal(
+              "Failed to send verification code. Please try again."
+            );
+          }
+
           return res.status(200).json({
             success: true,
             requires2FA: true,
-            userId: user.userId,
+            userId: user._id,
+            message: "Verification code sent to your email",
+          });
+        }
+
+        // Check if legacy TOTP-based 2FA is required
+        if (user.twoFactorAuth && user.twoFactorAuth.enabled) {
+          return res.status(200).json({
+            success: true,
+            requires2FA: true,
+            userId: user._id,
             message: "Please provide 2FA token",
+            type: "totp",
           });
         }
 
@@ -125,6 +154,7 @@ exports.login = asyncHandler(async (req, res, next) => {
           user.refreshTokens = user.refreshTokens.slice(-5);
         }
 
+        user.lastLogin = new Date();
         await user.save();
 
         res.json({
@@ -154,52 +184,145 @@ exports.login = asyncHandler(async (req, res, next) => {
 
 // Verify 2FA token and complete login
 exports.verify2FA = asyncHandler(async (req, res) => {
-  const { userId, token } = req.body;
+  const {
+    validateVerificationCode,
+    resetFailedAttempts,
+    incrementFailedAttempts,
+    clearVerificationCode,
+  } = require("../services/twoFactorService");
+  const { userId, code, type = "email" } = req.body;
 
-  const user = await User.findById(userId).select("+twoFactorAuth.secret");
+  const user = await User.findById(userId);
 
-  if (!user || !user.twoFactorAuth.enabled) {
-    throw errors.badRequest("Invalid request");
+  if (!user) {
+    throw errors.notFound("User not found");
   }
 
-  // Verify token
-  const verified = speakeasy.totp.verify({
-    secret: user.twoFactorAuth.secret,
-    encoding: "base32",
-    token,
-    window: 2,
-  });
+  // Handle email-based 2FA (default)
+  if (type === "email" || !user.twoFactorAuth.enabled) {
+    if (!user.twoFactorEmail || !user.twoFactorEmail.enabled) {
+      throw errors.badRequest("2FA is not enabled for this account");
+    }
 
-  if (!verified) {
-    throw errors.unauthorized("Invalid 2FA token");
+    // Fetch code details with select
+    const userWithCode = await User.findById(userId).select(
+      "+twoFactorEmail.verificationCode +twoFactorEmail.codeExpiresAt +twoFactorEmail.failedAttempts +twoFactorEmail.lockedUntil"
+    );
+
+    const validation = validateVerificationCode(
+      code,
+      userWithCode.twoFactorEmail.verificationCode,
+      userWithCode.twoFactorEmail.codeExpiresAt,
+      userWithCode.twoFactorEmail.failedAttempts,
+      userWithCode.twoFactorEmail.lockedUntil
+    );
+
+    if (!validation.valid) {
+      // Handle failed attempt
+      if (validation.shouldLock) {
+        incrementFailedAttempts(userWithCode);
+        await userWithCode.save();
+        throw errors.unauthorized(validation.error);
+      } else if (validation.attemptsRemaining !== undefined) {
+        incrementFailedAttempts(userWithCode);
+        await userWithCode.save();
+        throw errors.unauthorized(validation.error);
+      } else {
+        // Code expired or locked
+        throw errors.unauthorized(validation.error);
+      }
+    }
+
+    // Code is valid - reset failed attempts and clear the code
+    resetFailedAttempts(userWithCode);
+    clearVerificationCode(userWithCode);
+    userWithCode.lastLogin = new Date();
+    await userWithCode.save();
+
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(userWithCode._id);
+
+    // Save refresh token
+    await saveRefreshToken(
+      userWithCode,
+      refreshToken,
+      req.get("user-agent"),
+      req.ip
+    );
+
+    return res.json({
+      success: true,
+      message: "Login successful",
+      data: {
+        user: {
+          id: userWithCode._id,
+          email: userWithCode.email,
+          username: userWithCode.username,
+          role: userWithCode.role,
+        },
+        tokens: {
+          accessToken,
+          refreshToken,
+          expiresIn: 900,
+        },
+      },
+    });
   }
 
-  // Generate tokens
-  const { accessToken, refreshToken } = generateTokens(user._id);
+  // Handle legacy TOTP-based 2FA
+  if (type === "totp") {
+    if (!user.twoFactorAuth || !user.twoFactorAuth.enabled) {
+      throw errors.badRequest("TOTP 2FA is not enabled for this account");
+    }
 
-  // Save refresh token
-  await saveRefreshToken(user, refreshToken, req.get("user-agent"), req.ip);
+    const userWithSecret = await User.findById(userId).select(
+      "+twoFactorAuth.secret"
+    );
 
-  user.lastLogin = new Date();
-  await user.save();
+    // Verify TOTP token
+    const verified = speakeasy.totp.verify({
+      secret: userWithSecret.twoFactorAuth.secret,
+      encoding: "base32",
+      token: code,
+      window: 2,
+    });
 
-  res.json({
-    success: true,
-    message: "Login successful",
-    data: {
-      user: {
-        id: user._id,
-        email: user.email,
-        username: user.username,
-        role: user.role,
+    if (!verified) {
+      throw errors.unauthorized("Invalid 2FA token");
+    }
+
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(userWithSecret._id);
+
+    // Save refresh token
+    await saveRefreshToken(
+      userWithSecret,
+      refreshToken,
+      req.get("user-agent"),
+      req.ip
+    );
+
+    userWithSecret.lastLogin = new Date();
+    await userWithSecret.save();
+
+    res.json({
+      success: true,
+      message: "Login successful",
+      data: {
+        user: {
+          id: userWithSecret._id,
+          email: userWithSecret.email,
+          username: userWithSecret.username,
+          role: userWithSecret.role,
+        },
+        tokens: {
+          accessToken,
+          refreshToken,
+          expiresIn: 900,
+        },
       },
-      tokens: {
-        accessToken,
-        refreshToken,
-        expiresIn: 900,
-      },
-    },
-  });
+    });
+  }
 });
 
 // Refresh access token
