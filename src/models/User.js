@@ -57,6 +57,16 @@ const userSchema = new mongoose.Schema(
       secret: { type: String, select: false },
       backupCodes: { type: [String], select: false },
     },
+    // Email-based 2FA fields
+    twoFactorEmail: {
+      enabled: { type: Boolean, default: false },
+      verificationCode: { type: String, select: false }, // 6-digit code
+      codeExpiresAt: { type: Date, select: false }, // Expiry time for the code
+      lastCodeSentAt: { type: Date, select: false }, // When was the code last sent
+      failedAttempts: { type: Number, default: 0, select: false }, // Track failed attempts
+      lockedUntil: { type: Date, select: false }, // Lock account after failed attempts
+      setupVerified: { type: Boolean, default: false }, // Whether user verified their email during setup
+    },
     refreshTokens: [
       {
         token: { type: String, required: true },

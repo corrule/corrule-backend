@@ -626,3 +626,116 @@ exports.sendPurchaseConfirmationEmail = async (
     console.error("Failed to send purchase confirmation:", error);
   }
 };
+
+// Send 2FA verification code email
+exports.send2FAEmail = async (email, verificationCode) => {
+  if (!isEmailEnabled()) {
+    console.warn("⚠ Email disabled - 2FA code email not sent to:", email);
+    return;
+  }
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: email,
+    subject: "Your Two-Factor Authentication Code - Corrule",
+    html: `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 20px 0;">
+            <tr>
+              <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; background-color: ${COLORS.surface}; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);">
+                  <!-- Header -->
+                  <tr>
+                    <td>
+                      ${getEmailHeader(COLORS.primary)}
+                    </td>
+                  </tr>
+
+                  <!-- Content -->
+                  <tr>
+                    <td style="padding: 40px 30px;">
+                      <h2 style="color: ${COLORS.background}; font-size: 24px; margin: 0 0 16px 0; font-weight: 600;">Your Login Code</h2>
+                      
+                      <p style="color: #4b5563; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;">
+                        We received a login attempt on your Corrule account. Use the code below to complete your login:
+                      </p>
+
+                      <!-- Code Display -->
+                      <table width="100%" cellpadding="0" cellspacing="0" style="margin: 30px 0;">
+                        <tr>
+                          <td align="center">
+                            <div style="background: linear-gradient(135deg, ${COLORS.primary} 0%, #10a592 100%); 
+                                        padding: 40px; border-radius: 12px; 
+                                        box-shadow: 0 4px 16px rgba(20, 184, 165, 0.25);">
+                              <div style="font-size: 48px; font-weight: 700; color: #ffffff; 
+                                          letter-spacing: 12px; font-family: 'Courier New', monospace; 
+                                          text-align: center; margin: 0; line-height: 1.2;">
+                                ${verificationCode.split('').join(' ')}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <!-- Code Info -->
+                      <table width="100%" cellpadding="0" cellspacing="0" style="margin: 30px 0; background-color: #f9fafb; border-radius: 8px; padding: 20px;">
+                        <tr>
+                          <td>
+                            <p style="color: #4b5563; font-size: 14px; margin: 0 0 12px 0;">
+                              <strong>Code expires in:</strong> 2 minutes
+                            </p>
+                            <p style="color: #4b5563; font-size: 14px; margin: 0;">
+                              <strong>What to do:</strong> Enter this code in your login screen to verify your identity.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <!-- Security Warning -->
+                      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 30px;">
+                        <tr>
+                          <td style="background-color: rgba(239, 68, 68, 0.08); border-left: 4px solid ${COLORS.destructive}; padding: 16px; border-radius: 4px;">
+                            <p style="color: ${COLORS.destructive}; font-size: 13px; margin: 0; font-weight: 500; line-height: 1.5;">
+                              🔒 <strong>Never share this code:</strong> We will never ask for this code via email or phone. If you didn't request this code, please change your password immediately and contact our support team.
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <!-- Footer Text -->
+                      <p style="color: #9ca3af; font-size: 13px; line-height: 1.6; margin: 30px 0 0 0;">
+                        If you didn't initiate this login attempt, please secure your account right away.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <!-- Footer -->
+                  <tr>
+                    <td>
+                      ${getEmailFooter()}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("2FA code email sent to:", email);
+  } catch (error) {
+    console.error("Failed to send 2FA code email:", error.message);
+    throw error;
+  }
+};

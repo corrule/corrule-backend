@@ -822,4 +822,273 @@ exports.deleteSocialMedia = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Enable Two-Factor Authentication (Email-based)
+ * @route POST /api/v1/users/2fa/enable
+ * @access Private
+ * @description Send verification code to user's email to enable 2FA
+ */
+exports.enable2FA = asyncHandler(async (req, res) => {
+  const { send2FAEmail } = require("../utils/email");
+  const {
+    generateAndStoreCode,
+    canResendCode,
+  } = require("../services/twoFactorService");
+
+  const user = await User.findById(req.user._id);
+
+  if (!user) {
+    throw errors.notFound("User not found");
+  }
+
+  // Check if 2FA is already enabled
+  if (user.twoFactorEmail && user.twoFactorEmail.enabled) {
+    throw errors.conflict("2FA is already enabled for this account");
+  }
+
+  // Check resend cooldown
+  const { canResend, secondsRemaining } = canResendCode(
+    user.twoFactorEmail?.lastCodeSentAt
+  );
+
+  if (!canResend) {
+    throw errors.tooManyRequests(
+      `Please wait ${secondsRemaining} seconds before requesting a new code`
+    );
+  }
+
+  // Initialize 2FA object if it doesn't exist
+  if (!user.twoFactorEmail) {
+    user.twoFactorEmail = {
+      enabled: false,
+      setupVerified: false,
+      failedAttempts: 0,
+    };
+  }
+
+  // Generate and store verification code
+  const code = generateAndStoreCode(user);
+
+  try {
+    await send2FAEmail(user.email, code);
+  } catch (error) {
+    console.error("Failed to send 2FA code:", error);
+    throw errors.internal("Failed to send verification code. Please try again.");
+  }
+
+  await user.save();
+
+  res.json({
+    success: true,
+    message: "Verification code sent to your email",
+    data: {
+      email: user.email,
+      expiresIn: 120, // 2 minutes
+    },
+  });
+});
+
+/**
+ * Verify and Complete 2FA Setup
+ * @route POST /api/v1/users/2fa/verify-setup
+ * @access Private
+ * @description Verify the code and complete 2FA setup
+ */
+exports.verify2FASetup = asyncHandler(async (req, res) => {
+  const {
+    validateVerificationCode,
+    enable2FA,
+    clearVerificationCode,
+    incrementFailedAttempts,
+  } = require("../services/twoFactorService");
+
+  const { code } = req.body;
+
+  if (!code) {
+    throw errors.badRequest("Verification code is required");
+  }
+
+  const user = await User.findById(req.user._id).select(
+    "+twoFactorEmail.verificationCode +twoFactorEmail.codeExpiresAt +twoFactorEmail.failedAttempts +twoFactorEmail.lockedUntil"
+  );
+
+  if (!user) {
+    throw errors.notFound("User not found");
+  }
+
+  if (!user.twoFactorEmail) {
+    throw errors.badRequest("2FA setup not initiated");
+  }
+
+  // Validate the code
+  const validation = validateVerificationCode(
+    code,
+    user.twoFactorEmail.verificationCode,
+    user.twoFactorEmail.codeExpiresAt,
+    user.twoFactorEmail.failedAttempts,
+    user.twoFactorEmail.lockedUntil
+  );
+
+  if (!validation.valid) {
+    if (validation.shouldLock) {
+      incrementFailedAttempts(user);
+      await user.save();
+    } else if (validation.attemptsRemaining !== undefined) {
+      incrementFailedAttempts(user);
+      await user.save();
+    }
+
+    throw errors.unauthorized(validation.error);
+  }
+
+  // Code is valid - enable 2FA
+  enable2FA(user);
+  clearVerificationCode(user);
+  await user.save();
+
+  res.json({
+    success: true,
+    message: "Two-Factor Authentication enabled successfully",
+    data: {
+      twoFactorEnabled: user.twoFactorEmail.enabled,
+    },
+  });
+});
+
+/**
+ * Disable Two-Factor Authentication
+ * @route POST /api/v1/users/2fa/disable
+ * @access Private
+ * @description Disable 2FA for the user (requires password confirmation)
+ */
+exports.disable2FA = asyncHandler(async (req, res) => {
+  const { password } = req.body;
+  const { disable2FA } = require("../services/twoFactorService");
+
+  if (!password) {
+    throw errors.badRequest("Password is required to disable 2FA");
+  }
+
+  // Fetch user with password
+  const user = await User.findById(req.user._id).select("+password");
+
+  if (!user) {
+    throw errors.notFound("User not found");
+  }
+
+  // Verify password
+  const isPasswordValid = await user.comparePassword(password);
+  if (!isPasswordValid) {
+    throw errors.unauthorized("Incorrect password");
+  }
+
+  // Check if 2FA is enabled
+  if (!user.twoFactorEmail || !user.twoFactorEmail.enabled) {
+    throw errors.badRequest("2FA is not enabled for this account");
+  }
+
+  // Disable 2FA
+  disable2FA(user);
+  await user.save();
+
+  res.json({
+    success: true,
+    message: "Two-Factor Authentication disabled successfully",
+    data: {
+      twoFactorEnabled: false,
+    },
+  });
+});
+
+/**
+ * Resend 2FA Verification Code
+ * @route POST /api/v1/users/2fa/resend-code
+ * @access Private
+ * @description Resend the verification code during login or setup
+ */
+exports.resend2FACode = asyncHandler(async (req, res) => {
+  const { send2FAEmail } = require("../utils/email");
+  const {
+    generateAndStoreCode,
+    canResendCode,
+  } = require("../services/twoFactorService");
+
+  const user = await User.findById(req.user._id);
+
+  if (!user) {
+    throw errors.notFound("User not found");
+  }
+
+  // Check resend cooldown
+  const { canResend, secondsRemaining } = canResendCode(
+    user.twoFactorEmail?.lastCodeSentAt
+  );
+
+  if (!canResend) {
+    throw errors.tooManyRequests(
+      `Please wait ${secondsRemaining} seconds before requesting a new code`
+    );
+  }
+
+  // Initialize 2FA object if it doesn't exist
+  if (!user.twoFactorEmail) {
+    user.twoFactorEmail = {
+      enabled: false,
+      setupVerified: false,
+      failedAttempts: 0,
+    };
+  }
+
+  // Generate and store new verification code
+  const code = generateAndStoreCode(user);
+
+  try {
+    await send2FAEmail(user.email, code);
+  } catch (error) {
+    console.error("Failed to send 2FA code:", error);
+    throw errors.internal("Failed to send verification code. Please try again.");
+  }
+
+  await user.save();
+
+  res.json({
+    success: true,
+    message: "Verification code resent to your email",
+    data: {
+      email: user.email,
+      expiresIn: 120, // 2 minutes
+    },
+  });
+});
+
+/**
+ * Get 2FA Status
+ * @route GET /api/v1/users/2fa/status
+ * @access Private
+ * @description Get the current 2FA status
+ */
+exports.get2FAStatus = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select(
+    "twoFactorEmail.enabled twoFactorAuth.enabled"
+  );
+
+  if (!user) {
+    throw errors.notFound("User not found");
+  }
+
+  res.json({
+    success: true,
+    data: {
+      emailBased2FA: {
+        enabled: user.twoFactorEmail?.enabled || false,
+      },
+      totpBased2FA: {
+        enabled: user.twoFactorAuth?.enabled || false,
+      },
+    },
+  });
+});
+
+
+
 

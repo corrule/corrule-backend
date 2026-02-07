@@ -304,69 +304,6 @@ router.post(
 );
 
 /**
- * @route   POST /api/v1/users/2fa/disable
- * @desc    Disable 2FA
- * @access  Private
- */
-router.post(
-  "/2fa/disable",
-  authenticate,
-  [body("token").isLength({ min: 6, max: 6 })],
-  validate,
-  async (req, res) => {
-    try {
-      const { token } = req.body;
-
-      const user = await User.findById(req.user._id);
-
-      if (!user.requires2FA) {
-        return res.status(400).json({
-          success: false,
-          message: "2FA is not enabled",
-        });
-      }
-
-      // Verify token before disabling
-      const verified = speakeasy.totp.verify({
-        secret: user.twoFactorSecret,
-        encoding: "base32",
-        token,
-        window: 2,
-      });
-
-      if (!verified) {
-        return res.status(401).json({
-          success: false,
-          message: "Invalid token",
-        });
-      }
-
-      // Disable 2FA
-      const updatedUser = await User.findByIdAndUpdate(
-        req.user._id,
-        {
-          requires2FA: false,
-          twoFactorSecret: undefined,
-        },
-        { new: true },
-      );
-
-      res.json({
-        success: true,
-        message: "2FA disabled successfully",
-        data: { user: updatedUser },
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: "Failed to disable 2FA",
-        error: error.message,
-      });
-    }
-  },
-);
-
-/**
  * @route   GET /api/v1/users/stats
  * @desc    Get current user's statistics (rules created, earnings, etc.)
  * @access  Private
@@ -514,6 +451,65 @@ router.delete(
   userController.deleteSocialMedia,
 );
 
+// =====================================================
+// Two-Factor Authentication (2FA) Routes
+// =====================================================
+
+/**
+ * @route   GET /api/v1/users/2fa/status
+ * @desc    Get current 2FA status
+ * @access  Private
+ */
+router.get("/2fa/status", authenticate, userController.get2FAStatus);
+
+/**
+ * @route   POST /api/v1/users/2fa/enable
+ * @desc    Enable 2FA and send verification code
+ * @access  Private
+ */
+router.post(
+  "/2fa/enable",
+  authenticate,
+  userController.enable2FA,
+);
+
+/**
+ * @route   POST /api/v1/users/2fa/verify-setup
+ * @desc    Verify 2FA setup with code
+ * @access  Private
+ */
+router.post(
+  "/2fa/verify-setup",
+  authenticate,
+  [body("code").trim().isLength({ min: 6, max: 6 }).isNumeric()],
+  validate,
+  userController.verify2FASetup,
+);
+
+/**
+ * @route   POST /api/v1/users/2fa/disable
+ * @desc    Disable 2FA (requires password)
+ * @access  Private
+ */
+router.post(
+  "/2fa/disable",
+  authenticate,
+  [body("password").notEmpty().withMessage("Password is required")],
+  validate,
+  userController.disable2FA,
+);
+
+/**
+ * @route   POST /api/v1/users/2fa/resend-code
+ * @desc    Resend verification code
+ * @access  Private
+ */
+router.post(
+  "/2fa/resend-code",
+  authenticate,
+  userController.resend2FACode,
+);
+
 /**
  * @route   GET /api/v1/users/:id
  * @desc    Get public user profile by username only (no ID-based access)
@@ -538,3 +534,4 @@ router.get("/:id", (req, res, next) => {
 });
 
 module.exports = router;
+
